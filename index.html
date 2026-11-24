@@ -81,6 +81,8 @@ button:disabled{opacity:.5;cursor:default}
 #toast{position:fixed;z-index:7;left:50%;top:calc(env(safe-area-inset-top,0px) + 112px);transform:translate(-50%,-6px);background:var(--ink);color:var(--paper-2);padding:.5em 1.1em;font-size:15px;opacity:0;transition:opacity .35s,transform .35s;pointer-events:none;max-width:calc(100vw - 48px);text-align:center}
 #toast.show{opacity:.94;transform:translate(-50%,0)}
 #pops{position:fixed;inset:0;pointer-events:none;z-index:4;overflow:hidden}
+#bubble{position:fixed;z-index:5;transform:translate(-50%,-100%);background:var(--paper-2);border:1px solid var(--wood);padding:8px 12px;font-size:15px;line-height:1.6;max-width:min(260px,70vw);box-shadow:0 4px 12px var(--shadow);pointer-events:none}
+#bubble::after{content:"";position:absolute;left:50%;bottom:-7px;width:12px;height:12px;background:var(--paper-2);border-right:1px solid var(--wood);border-bottom:1px solid var(--wood);transform:translateX(-50%) rotate(45deg)}
 .pop{position:absolute;font-family:var(--f-brush);color:#ffe1a8;font-size:23px;white-space:nowrap;animation:rise 1.2s ease-out forwards;text-shadow:0 1px 4px rgba(0,0,0,.65)}
 @keyframes rise{0%{opacity:0;transform:translate(-50%,-20%)}15%{opacity:1}100%{opacity:0;transform:translate(-50%,-220%)}}
 #joy{display:none;position:fixed;z-index:6;left:max(26px,calc(env(safe-area-inset-left,0px) + 26px));bottom:calc(env(safe-area-inset-bottom,0px) + 28px);width:120px;height:120px;border-radius:50%;border:1.5px solid rgba(255,248,238,.7);background:rgba(28,22,18,.28);touch-action:none}
@@ -160,6 +162,7 @@ button:disabled{opacity:.5;cursor:default}
 <div id="hud" hidden><span>功德 <b id="merit">0</b></span><span>敬香 <b id="incense">0</b> 次</span></div>
 <div id="area" hidden></div>
 <div id="tools" hidden>
+  <button id="btnGuide" type="button">导览</button>
   <button id="btnMap" type="button">地图</button>
   <button id="btnQuality" type="button">画质 高</button>
   <button id="btnSound" type="button">声音 开</button>
@@ -172,6 +175,7 @@ button:disabled{opacity:.5;cursor:default}
 <div id="zen" hidden></div>
 <div id="toast" role="status" aria-live="polite"></div>
 <div id="pops" aria-hidden="true"></div>
+<div id="bubble" hidden></div>
 <div id="joy" aria-hidden="true" hidden><div id="knob"></div></div>
 
 <div id="help" class="overlay" hidden>
@@ -192,6 +196,8 @@ button:disabled{opacity:.5;cursor:default}
       <tr><td><kbd>R</kbd> 键</td><td>开始或停止诵经</td></tr>
       <tr><td><kbd>B</kbd> 键</td><td>礼拜</td></tr>
       <tr><td><kbd>M</kbd> 键</td><td>打开地图</td></tr>
+      <tr><td><kbd>G</kbd> 键</td><td>打开导览：选一个地方，地上出现金色箭头带路</td></tr>
+      <tr><td>走近小和尚按 <kbd>E</kbd> 键</td><td>打招呼，他会跟你说话、给你指路</td></tr>
       <tr><td><kbd>Esc</kbd> 键（退出键）</td><td>起身，或关闭弹出的窗口</td></tr>
       <tr><th colspan="2">手机</th></tr>
       <tr><td>左下圆盘</td><td>按住拖动走路</td></tr>
@@ -217,6 +223,15 @@ button:disabled{opacity:.5;cursor:default}
     <h2 id="pickTitle">选一部经</h2>
     <div class="pick" id="pickList"></div>
     <div class="row"><button id="pickClose" type="button">先不念了</button></div>
+  </div>
+</div>
+
+<div id="guideBox" class="overlay" hidden>
+  <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="guideTitle">
+    <h2 id="guideTitle">想去哪里？</h2>
+    <p class="muted small">选好之后，地上会出现一串金色箭头，跟着走就到了。</p>
+    <div class="pick" id="guideList"></div>
+    <div class="row"><button id="guideStop" type="button" hidden>结束导览</button><button id="guideClose" type="button">关闭</button></div>
   </div>
 </div>
 
@@ -280,11 +295,20 @@ scene.fog = new THREE.Fog(FOG, 60, 380);
 const camera = new THREE.PerspectiveCamera(55, innerWidth / innerHeight, 0.1, 1000);
 const hemi = new THREE.HemisphereLight(0xdfe6ef, 0x6b5f4e, 0.5); scene.add(hemi);
 const sun = new THREE.DirectionalLight(0xffe6c6, 2.7);
-sun.position.set(-38, 58, 32); sun.target.position.set(0, 0, -6);
+const LIGHT_DIR = new THREE.Vector3(-38, 58, 32).normalize();
 sun.castShadow = true;
-Object.assign(sun.shadow.camera, { left: -56, right: 56, top: 56, bottom: -56, near: 10, far: 190 });
-sun.shadow.bias = -0.0004; sun.shadow.normalBias = 0.05;
+Object.assign(sun.shadow.camera, { left: -34, right: 34, top: 34, bottom: -34, near: 1, far: 230 });
+sun.shadow.camera.updateProjectionMatrix();
+sun.shadow.bias = -0.0006; sun.shadow.normalBias = 0.025;
 scene.add(sun, sun.target);
+// 阴影只覆盖玩家周围一块，并按阴影像素对齐，走动时不闪
+const _lm = new THREE.Matrix4().lookAt(new THREE.Vector3(), LIGHT_DIR.clone().negate(), new THREE.Vector3(0, 1, 0)), _lmi = _lm.clone().invert(), _sv = new THREE.Vector3();
+function followShadow(x, z) {
+  const ts = 68 / sun.shadow.mapSize.x;
+  _sv.set(x, 0, z).applyMatrix4(_lmi); _sv.x = Math.round(_sv.x / ts) * ts; _sv.y = Math.round(_sv.y / ts) * ts; _sv.applyMatrix4(_lm);
+  sun.target.position.copy(_sv); sun.position.copy(_sv).addScaledVector(LIGHT_DIR, 110);
+}
+followShadow(0, 20);
 const pointLights = [];
 function warmLight(x, y, z, i = 22, d = 18, keep = false) { const l = new THREE.PointLight(0xffbf7d, i, d, 1.6); l.position.set(x, y, z); l.userData.keep = keep; scene.add(l); pointLights.push(l); return l; }
 function applyQuality(first) {
@@ -312,7 +336,8 @@ manager.onError = url => console.warn('素材加载失败', url);
 setTimeout(readyToEnter, 25000);
 function readyToEnter() { if (loadedOnce) return; loadedOnce = true; $('loadBar').style.width = '100%'; $('loadText').textContent = '山门已开。'; $('enter').disabled = false; $('enter').focus(); }
 const texLoader = new THREE.TextureLoader(manager);
-function loadTex(file, srgb, rep) { const t = texLoader.load(A + file); t.wrapS = t.wrapT = THREE.RepeatWrapping; t.anisotropy = 8; if (srgb) t.colorSpace = THREE.SRGBColorSpace; if (rep) t.repeat.set(rep, rep); return t; }
+const MAX_ANISO = Math.min(16, renderer.capabilities.getMaxAnisotropy());
+function loadTex(file, srgb, rep) { const t = texLoader.load(A + file); t.wrapS = t.wrapT = THREE.RepeatWrapping; t.anisotropy = MAX_ANISO; if (srgb) t.colorSpace = THREE.SRGBColorSpace; if (rep) t.repeat.set(rep, rep); return t; }
 function pbr(name, meters, o = {}) {
   const r = 1 / meters;
   return new THREE.MeshStandardMaterial({
@@ -438,12 +463,18 @@ if (document.fonts && document.fonts.load) document.fonts.load('64px "Ma Shan Zh
 const [roofCol, roofNor] = roofTextures();
 const MATS = {
   stone: pbr('stone', 2.2),
+  court: pbr('stone', 2.8, { ns: 0.45 }),
+  path: pbr('stone', 1.5, { color: 0xf4eee2, ns: 0.35 }),
+  lotusLeaf: new THREE.MeshStandardMaterial({ color: 0x3d6a34, roughness: 0.55, side: THREE.DoubleSide }),
+  lotusStem: new THREE.MeshStandardMaterial({ color: 0x4b6b3a, roughness: 0.7 }),
+  lotusPink: new THREE.MeshStandardMaterial({ color: 0xeaa6ba, roughness: 0.6 }),
+  lotusCenter: new THREE.MeshStandardMaterial({ color: 0xd8b648, roughness: 0.6 }),
   stoneDark: pbr('stone', 1.6, { color: 0xb9b2a6 }),
   marble: pbr('stone', 1.4, { color: 0xfffaf0, ns: 0.6 }),
   whitewall: pbr('whitewall', 2.5),
   redwall: pbr('redwall', 2.4, { color: 0xe0b0a0 }),
   wood: pbr('wood', 1.2, { color: 0xb08870 }),
-  floor: pbr('floor', 1.6, { color: 0xb59d88 }),
+  floor: pbr('floor', 1.6, { color: 0xb59d88, ns: 0.6 }),
   lacquer: pbr('wood', 1.0, { color: 0xd04a34, rough: 0.55, ns: 0.4 }),
   beam: pbr('wood', 1.0, { color: 0x6a2c20, ns: 0.5 }),
   under: pbr('wood', 0.8, { color: 0x7a5544, ns: 0.8 }),
@@ -474,11 +505,16 @@ const MATS = {
   ginkgo: new THREE.MeshStandardMaterial({ map: ginkgoTex, alphaTest: 0.45, side: THREE.DoubleSide, roughness: 0.8 }),
   bamboo: new THREE.MeshStandardMaterial({ color: 0x6f8a55, roughness: 0.6 }),
   bambooLeaf: new THREE.MeshStandardMaterial({ map: bambooLeafTex, alphaTest: 0.45, side: THREE.DoubleSide, roughness: 0.8 }),
-  terrain: new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 1 })
+  terrain: new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 1 }),
+  leafy: new THREE.MeshStandardMaterial({ map: cardTex(x => { for (let i = 0; i < 170; i++) { const cx = 16 + Math.random() * 224, cy = 16 + Math.random() * 224; x.save(); x.translate(cx, cy); x.rotate(Math.random() * PI * 2); x.fillStyle = `rgb(${40 + Math.random() * 30},${70 + Math.random() * 40},${35 + Math.random() * 20})`; x.beginPath(); x.ellipse(0, 0, 9, 5, 0, 0, PI * 2); x.fill(); x.restore(); } }), alphaTest: 0.45, side: THREE.DoubleSide, roughness: 0.85 }),
+  blossom: new THREE.MeshStandardMaterial({ map: cardTex(x => { for (let i = 0; i < 46; i++) { const cx = 20 + Math.random() * 216, cy = 20 + Math.random() * 216, c = Math.random() < 0.7 ? [236, 140, 170] : [250, 236, 240]; for (let k = 0; k < 5; k++) { const a = k / 5 * PI * 2; x.fillStyle = `rgb(${c[0]},${c[1]},${c[2]})`; x.beginPath(); x.arc(cx + Math.cos(a) * 5, cy + Math.sin(a) * 5, 4.6, 0, PI * 2); x.fill(); } x.fillStyle = '#e8c14a'; x.beginPath(); x.arc(cx, cy, 2.4, 0, PI * 2); x.fill(); } }), alphaTest: 0.45, side: THREE.DoubleSide, roughness: 0.7 }),
+  grass: new THREE.MeshStandardMaterial({ map: cardTex(x => { for (let i = 0; i < 90; i++) { const bx = 20 + Math.random() * 216, h = 80 + Math.random() * 150; x.strokeStyle = `rgb(${70 + Math.random() * 40},${95 + Math.random() * 45},${45 + Math.random() * 20})`; x.lineWidth = 2 + Math.random() * 2; x.beginPath(); x.moveTo(bx, 256); x.quadraticCurveTo(bx + (Math.random() - 0.5) * 30, 256 - h * 0.6, bx + (Math.random() - 0.5) * 60, 256 - h); x.stroke(); } }), alphaTest: 0.4, side: THREE.DoubleSide, roughness: 0.9 }),
+  leafDecal: new THREE.MeshStandardMaterial({ map: ginkgoTex, alphaTest: 0.45, roughness: 0.85, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -4 })
 };
+for (const k of ['path']) { MATS[k].polygonOffset = true; MATS[k].polygonOffsetFactor = -1; MATS[k].polygonOffsetUnits = -2; }
 MATS.beam.side = THREE.DoubleSide; MATS.under.side = THREE.DoubleSide;
-const ALPHA = new Set(['needle', 'ginkgo', 'bambooLeaf']);
-const NOCAST = new Set(['floor', 'paint', 'glow', 'under', 'haloRed', 'haloBlue']);
+const ALPHA = new Set(['needle', 'ginkgo', 'bambooLeaf', 'leafy', 'blossom', 'grass']);
+const NOCAST = new Set(['floor', 'paint', 'glow', 'under', 'haloRed', 'haloBlue', 'path', 'leafDecal', 'grass', 'lotusLeaf']);
 
 /* ================= 合批 ================= */
 const batches = {};
@@ -745,7 +781,7 @@ function fbm(x, y) { let s = 0, a = 0.5, f = 1; for (let i = 0; i < 5; i++) { s 
     const d = Math.hypot(dx, dz);
     const n = fbm(x * 0.012 + 7, z * 0.012 + 3);
     let h = sstep(4, 160, d) * (8 + 70 * n) + sstep(160, 420, d) * 60 * fbm(x * 0.004, z * 0.004);
-    if (d < 2) h = -0.05;
+    if (d < 2) h = -0.4;
     p.setY(i, h);
     tmp.copy(grass).lerp(dry, clamp(n * 1.3 - 0.2, 0, 1)).lerp(rock, sstep(28, 60, h));
     col[i * 3] = tmp.r; col[i * 3 + 1] = tmp.g; col[i * 3 + 2] = tmp.b;
@@ -754,7 +790,7 @@ function fbm(x, y) { let s = 0, a = 0.5, f = 1; for (let i = 0; i < 5; i++) { s 
   const t = new THREE.Mesh(g, MATS.terrain); t.receiveShadow = true; scene.add(t);
   const court = new THREE.PlaneGeometry(68, 86); court.rotateX(-PI / 2);
   const uv = court.attributes.uv; for (let i = 0; i < uv.count; i++) uv.setXY(i, uv.getX(i) * 68, uv.getY(i) * 86);
-  const cm = new THREE.Mesh(court, MATS.stone); cm.position.set(0, 0.01, -5); cm.receiveShadow = true; scene.add(cm);
+  const cm = new THREE.Mesh(court, MATS.court); cm.position.set(0, 0.01, -5); cm.receiveShadow = true; scene.add(cm);
 }
 
 /* ================= 院墙 ================= */
@@ -984,11 +1020,7 @@ function seat(F, lx, lz, lyaw, hallName, y, o = {}) {
     SF.put('redcloth', cylUV(0.2, 0.22, 0.05, 20), -0.72, 0.025, 0.55);
     const fm = new THREE.Mesh(fishG, fishMat); fm.matrixAutoUpdate = false; fm.matrix.copy(SF.m).multiply(M4(-0.72, 0.17, 0.55)); fm.castShadow = true; scene.add(fm);
     SF.put('dark', boxUV(0.14, 0.015, 0.02), -0.72, 0.17, 0.7);
-    const piv = new THREE.Group(); piv.matrixAutoUpdate = false; piv.matrix.copy(SF.m).multiply(M4(-1.16, 0.36, 0.55)); scene.add(piv);
-    const mallet = new THREE.Group(); piv.add(mallet);
-    const h = new THREE.Mesh(malletHandleG, malletMat); h.position.x = 0.21; mallet.add(h);
-    const hd = new THREE.Mesh(malletHeadG, malletMat); hd.position.x = 0.43; mallet.add(hd);
-    s.mallet = mallet; s.mt = 9; s.fish = SF.w(-0.72, 0.35, 0.55);
+    s.fish = SF.w(-0.72, 0.35, 0.55);
   }
   if (o.book) {
     SF.put('lacquer', boxUV(0.6, 0.28, 0.36), 0, 0.14, 0.75);
@@ -1160,7 +1192,66 @@ loadModel('chinese_tea_table', res => {
   const p = LF.w(0, LPH + 0.6, -3.25); o.position.set(p.x, p.y - bb.min.y * k, p.z); o.rotation.y = LF.ry + (sz.x < sz.z ? PI / 2 : 0);
   o.traverse(c => { if (c.isMesh) { c.castShadow = true; c.receiveShadow = true; } }); scene.add(o);
 });
-// 不想要的第一组铜罐（占位）在此忽略
+/* ================= 莲池、花丛、草、落叶 ================= */
+const waterMat = new THREE.MeshStandardMaterial({ color: 0x2a4542, roughness: 0.05, metalness: 0.4 });
+function pond(cx, cz, w, d) {
+  const F = new Frame(cx, cz);
+  for (const s of [-1, 1]) { F.put('stoneDark', boxUV(w + 0.6, 0.5, 0.3), 0, 0.25, s * (d / 2 + 0.15)); F.put('stoneDark', boxUV(0.3, 0.5, d), s * (w / 2 + 0.15), 0.25, 0); }
+  F.put('dark', boxUV(w, 0.04, d), 0, 0.03, 0);
+  const wm = new THREE.Mesh(new THREE.PlaneGeometry(w, d), waterMat); wm.rotation.x = -PI / 2; wm.position.set(cx, 0.32, cz); wm.receiveShadow = true; scene.add(wm);
+  for (let i = 0; i < 18; i++) { const r = 0.22 + rand() * 0.3, up = rand() < 0.25; F.put('lotusLeaf', new THREE.CircleGeometry(r, 20, 0.35, PI * 2 - 0.7), (rand() - 0.5) * (w - 0.9), up ? 0.55 + rand() * 0.3 : 0.335 + rand() * 0.01, (rand() - 0.5) * (d - 0.8), -PI / 2 + (up ? (rand() - 0.5) * 0.6 : 0), rand() * 6.28, 0); }
+  for (let i = 0; i < 6; i++) {
+    const x = (rand() - 0.5) * (w - 1.2), z = (rand() - 0.5) * (d - 1), h = 0.45 + rand() * 0.35;
+    F.put('lotusStem', cylUV(0.012, 0.016, h, 5), x, 0.32 + h / 2, z);
+    for (let k = 0; k < 9; k++) { const a = k / 9 * PI * 2; F.put('lotusPink', PETAL, x, 0.32 + h, z, -0.95 - (k % 2) * 0.35, a, 0, 0.17, 0.17, 0.17); }
+    F.put('lotusCenter', cylUV(0.045, 0.035, 0.05, 10), x, 0.32 + h + 0.04, z);
+  }
+  F.box(-w / 2 - 0.3, w / 2 + 0.3, -d / 2 - 0.3, d / 2 + 0.3, 0, 0.5);
+  mapItems.push({ ...F.aabb(-w / 2, w / 2, -d / 2, d / 2), label: '莲池', kind: 'pond' });
+}
+pond(-9.8, 26, 6, 3.2); pond(9.8, 26, 6, 3.2);
+areas.push({ n: '莲池', x0: -13.2, x1: -6.4, z0: 24, z1: 28, pri: 2 }, { n: '莲池', x0: 6.4, x1: 13.2, z0: 24, z1: 28, pri: 2 });
+function bush(x, z, s = 1, flowers = true) {
+  const F = new Frame(x, z, rand() * 6.28);
+  F.put('bark', new THREE.IcosahedronGeometry(0.42 * s, 1), 0, 0.42 * s, 0, 0, 0, 0, 1, 0.8, 1);
+  for (let i = 0; i < 9; i++) F.put('leafy', plane(1.1 * s, 1.1 * s), (rand() - 0.5) * 0.6 * s, (0.4 + rand() * 0.4) * s, (rand() - 0.5) * 0.6 * s, (rand() - 0.5) * 2.4, rand() * 6.28, 0);
+  if (flowers) for (let i = 0; i < 6; i++) F.put('blossom', plane(0.8 * s, 0.8 * s), (rand() - 0.5) * 0.7 * s, (0.62 + rand() * 0.3) * s, (rand() - 0.5) * 0.7 * s, -PI / 2 + (rand() - 0.5) * 1.3, rand() * 6.28, 0);
+  colliders.push({ t: 'c', x, z, r: 0.55 * s });
+}
+for (const x of [6.2, 8.6, 11, -6.2, -8.6, -11]) bush(x, 3.7, 1, true);
+for (const x of [5.2, 7.6, 9.8, -5.2, -7.6, -9.8]) bush(x, -25.0, 0.9, true);
+for (const x of [4.4, -4.4]) bush(x, 28.1, 0.8, true);
+for (const [x, z] of [[-16.0, -3.5], [-16.0, -14.5], [16.0, -3.5], [16.0, -14.5], [-24.5, 14], [24.5, 14], [-24.5, 26], [24.5, 26]]) bush(x, z, 0.85, rand() < 0.6);
+function tuft(x, z, s = 1) { const F = new Frame(x, z, rand() * 3); for (let i = 0; i < 2; i++) F.put('grass', plane(0.8 * s, 0.6 * s), 0, 0.3 * s, 0, 0, i * PI / 2, 0); }
+for (let i = 0; i < 70; i++) { const side = Math.floor(rand() * 3); let x, z; if (side === 0) { x = -WALL.x + 0.8 + rand() * 1.2; z = WALL.zN + 2 + rand() * (WALL.zS - WALL.zN - 4); } else if (side === 1) { x = WALL.x - 0.8 - rand() * 1.2; z = WALL.zN + 2 + rand() * (WALL.zS - WALL.zN - 4); } else { x = -WALL.x + 2 + rand() * (WALL.x * 2 - 4); z = WALL.zN + 0.9 + rand() * 1.2; } tuft(x, z, 0.8 + rand() * 0.6); }
+for (const [cx, cz] of [[-9.8, 26], [9.8, 26]]) for (let i = 0; i < 10; i++) { const a = rand() * PI * 2; tuft(cx + Math.cos(a) * 3.6, cz + Math.sin(a) * 2.1, 0.7 + rand() * 0.4); }
+{ const F = new Frame(0, 0); for (const gx of [-9, 9]) for (let i = 0; i < 60; i++) { const a = rand() * PI * 2, r = Math.sqrt(rand()) * 4.5; F.put('leafDecal', plane(0.55, 0.55), gx + Math.cos(a) * r, 0.035, -21 + Math.sin(a) * r, -PI / 2, rand() * 6.28, 0); } }
+
+/* ================= 石板路与指路牌 ================= */
+let pathI = 0;
+function pathSeg(x0, z0, x1, z1, w = 2.2) {
+  const len = Math.hypot(x1 - x0, z1 - z0), F = new Frame((x0 + x1) / 2, (z0 + z1) / 2, Math.atan2(x1 - x0, z1 - z0));
+  F.put('path', boxUV(w, 0.02, len + w * 0.5), 0, 0.012 + (pathI++) * 0.002, 0);
+}
+for (const s of [[0, 29.5, 0, 6.2, 3], [0, 23, -13.3, 20], [0, 23, 13.3, 20], [3.6, 6.6, 14.7, 6.6], [-3.6, 6.6, -14.7, 6.6], [14.7, 6.6, 14.7, -19.5], [-14.7, 6.6, -14.7, -19.5],
+  [14.7, -9, 16.2, -9], [-14.7, -9, -16.2, -9], [-14.7, -19.5, 14.7, -19.5], [0, -19.5, 0, -25.5, 3], [3, 8.5, 9.2, 6]]) pathSeg(...s);
+function signpost(x, z, ry, lines) {
+  const F = new Frame(x, z, ry);
+  F.put('beam', boxUV(0.14, 2.7, 0.14), 0, 1.35, -0.06);
+  F.put('tile2', new THREE.ConeGeometry(0.2, 0.22, 4), 0, 2.81, -0.06, 0, PI / 4, 0);
+  lines.forEach((t, i) => {
+    const y = 2.32 - i * 0.5;
+    F.put('beam', boxUV(2.1, 0.42, 0.06), 0, y, 0);
+    const n = [...t].length, tex = textTex(t, 720, 144, { bg: '#4e2618', fg: '#f3dfae', border: '#2e140c', size: Math.min(86, Math.floor(600 / n)) });
+    const m = new THREE.Mesh(plane(2.0, 0.36), new THREE.MeshStandardMaterial({ map: tex, roughness: 0.7 }));
+    m.matrixAutoUpdate = false; m.matrix.copy(F.m).multiply(M4(0, y, 0.035)); scene.add(m);
+  });
+  colliders.push({ t: 'c', x, z, r: 0.25 });
+}
+signpost(3.4, 20.6, 0, ['↑ 香炉 · 大雄宝殿', '← 钟楼 · 莲池', '→ 鼓楼 · 签亭']);
+signpost(4.8, 5.0, 0, ['↑ 大雄宝殿', '→ 念经堂（东侧）', '← 禅堂（西侧）', '↗ 绕殿到后院 · 讲经堂']);
+signpost(12.6, -16.2, 0, ['← 讲经堂 · 银杏树', '↓ 念经堂 · 前院']);
+signpost(-12.6, -16.2, 0, ['→ 讲经堂 · 银杏树', '↓ 禅堂 · 前院']);
 
 flush();
 
@@ -1196,7 +1287,8 @@ const monkGeo = {
   nose: ell(0.016, 0.7, 1, 1, 8, 6), mouth: new THREE.BoxGeometry(0.03, 0.005, 0.01), neck: new THREE.CylinderGeometry(0.045, 0.05, 0.1, 12),
   collar: new THREE.TorusGeometry(0.08, 0.02, 8, 20), shoe: ell(0.05, 1, 0.5, 1.8, 10, 8), lap: ell(0.3, 1.15, 0.36, 0.9, 20, 12),
   kasaya: (() => { const g = new THREE.CylinderGeometry(0.205, 0.215, 0.62, 24, 1, true, -0.4, PI * 1.25); return g; })(),
-  broomH: new THREE.CylinderGeometry(0.015, 0.015, 1.4, 6), broomB: new THREE.ConeGeometry(0.16, 0.45, 10)
+  broomH: new THREE.CylinderGeometry(0.015, 0.015, 1.3, 6), broomB: new THREE.ConeGeometry(0.16, 0.42, 10),
+  cap: new THREE.SphereGeometry(0.074, 14, 10), mHandle: new THREE.CylinderGeometry(0.012, 0.012, 0.17, 6), mHead: new THREE.SphereGeometry(0.045, 10, 8)
 };
 const matCache = {};
 const cm = (hex, o = {}) => matCache[hex + JSON.stringify(o)] ||= new THREE.MeshStandardMaterial(Object.assign({ color: hex, roughness: 0.92, side: THREE.DoubleSide }, o));
@@ -1225,11 +1317,17 @@ function makeMonk(o = {}) {
   for (const s of [1, -1]) {
     const a = new THREE.Group(); a.position.set(s * 0.2, 0.41, 0); upper.add(a);
     add(a, monkGeo.sleeve, robe); add(a, monkGeo.hand, skin, 0, -0.6, 0.02); arms.push(a);
+    add(upper, monkGeo.cap, robe, s * 0.2, 0.41, 0);
   }
+  const mallet = new THREE.Group(); mallet.position.set(0, -0.6, 0.02); arms[1].add(mallet); mallet.visible = false;
+  add(mallet, monkGeo.mHandle, cm(0x7a5232, { side: THREE.FrontSide }), 0, -0.08, 0); add(mallet, monkGeo.mHead, cm(0x7a5232, { side: THREE.FrontSide }), 0, -0.19, 0);
   if (o.scale) root.scale.setScalar(o.scale);
   scene.add(root);
-  return { root, body, upper, head, skirt, lap, shoes, armL: arms[0], armR: arms[1], walk: 0, walkAmt: 0, pray: 0, prayT: 0, bowT: -1, pulse: 0, seated: null, gest: 0 };
+  return { root, body, upper, head, skirt, lap, shoes, armL: arms[0], armR: arms[1], mallet, walk: 0, walkAmt: 0, pray: 0, prayT: 0, bowT: -1, kt: 9, seated: null, gest: 0, talkT: 0 };
 }
+const _down = new THREE.Vector3(0, -1, 0), _aq = new THREE.Quaternion(), _av = new THREE.Vector3();
+function aimArm(arm, p, k) { _av.set(p[0] - arm.position.x, p[1] - arm.position.y, p[2] - arm.position.z).normalize(); _aq.setFromUnitVectors(_down, _av); arm.quaternion.slerp(_aq, k); }
+const mixv = (a, b, t) => a.map((v, i) => lerp(v, b[i], t));
 function sitMonk(M, s) {
   M.seated = s; M.root.position.set(s.x, s.y, s.z); M.root.rotation.y = s.yaw;
   M.body.position.y = 0.15 - 0.95; M.skirt.visible = false; M.lap.visible = true; M.shoes.forEach(x => x.visible = false);
@@ -1237,23 +1335,28 @@ function sitMonk(M, s) {
 function standMonk(M) { M.seated = null; M.body.position.y = 0; M.skirt.visible = true; M.lap.visible = false; M.shoes.forEach(x => x.visible = true); }
 function animMonk(M, dt, t) {
   if (M.prayT > 0) M.prayT -= dt;
+  if (M.talkT > 0) M.talkT -= dt;
   let bow = 0;
   if (M.bowT >= 0) { M.bowT += dt / 2.2; const k = M.bowT; bow = k < 0.35 ? Math.sin(k / 0.35 * PI / 2) : k < 0.65 ? 1 : Math.cos((k - 0.65) / 0.35 * PI / 2); if (k >= 1) { M.bowT = -1; if (M.onBowDone) { const f = M.onBowDone; M.onBowDone = null; f(); } } }
   const wantPray = M.prayT > 0 || M.bowT >= 0;
   M.pray = lerp(M.pray, wantPray ? 1 : 0, 1 - Math.exp(-9 * dt));
-  M.pulse = Math.max(0, M.pulse - dt * 6);
-  const sw = Math.sin(M.walk) * 0.45 * M.walkAmt;
   if (!M.seated) M.body.position.y = Math.abs(Math.sin(M.walk)) * 0.03 * M.walkAmt;
-  M.upper.rotation.x = bow * (M.seated ? 0.95 : 1.05) + (M.nod ? Math.sin(t * 0.7 + M.nod) * 0.04 : 0);
+  M.upper.rotation.x = bow * (M.seated ? 0.95 : 1.05) + (M.nod ? Math.sin(t * 0.7 + M.nod) * 0.04 : 0) + (M.talkT > 0 ? Math.sin(t * 3) * 0.03 : 0);
   M.upper.rotation.z = Math.sin(M.walk) * 0.03 * M.walkAmt;
-  const sit = M.seated ? 1 : 0, fishK = M.seated && M.seated.fish ? 1 : 0;
-  let lx = lerp(sw, -0.55, sit), lz = lerp(0.12, -0.3, sit);
-  let rx = lerp(-sw, -0.55, sit), rz = lerp(-0.12, 0.3, sit);
-  if (fishK) { rx = lerp(rx, -0.75 - M.pulse * 0.5, 1); rz = lerp(rz, -0.2, 1); }
-  if (M.gest) { rx = -0.9 + Math.sin(t * 1.3) * 0.25 * M.gest; rz = -0.25; }
-  if (M.broom) { lx = -0.7 + Math.sin(t * 2.2) * 0.25; rx = -0.6 + Math.sin(t * 2.2) * 0.25; lz = -0.25; rz = 0.25; }
-  M.armL.rotation.x = lerp(lx, -1.25, M.pray); M.armL.rotation.z = lerp(lz, -0.5, M.pray);
-  M.armR.rotation.x = lerp(rx, -1.25, M.pray); M.armR.rotation.z = lerp(rz, 0.5, M.pray);
+  // 手臂对准目标点（坐标在上半身里），避免穿进身体
+  const fishK = !!(M.seated && M.seated.fish);
+  M.kt += dt; const lift = M.kt < 0.24 ? Math.sin(M.kt / 0.24 * PI) : 0;
+  M.mallet.visible = fishK;
+  const sw = Math.sin(M.walk) * 0.2 * M.walkAmt;
+  let L, R;
+  if (M.seated) { L = [0.14, -0.02, 0.38]; R = [-0.14, -0.02, 0.38]; }
+  else { L = [0.27, -0.18, 0.04 + sw]; R = [-0.27, -0.18, 0.04 - sw]; }
+  if (fishK) R = [-0.72, 0.21 + lift * 0.3, 0.53 - lift * 0.1];
+  if (M.gest) R = [-0.24, 0.22 + Math.sin(t * 1.3) * 0.1 * M.gest, 0.45];
+  if (M.broom) { const k = Math.sin(t * 2.2) * 0.14; L = [0.02 + k, 0.02, 0.36]; R = [-0.04 + k, -0.12, 0.42]; }
+  if (M.pray > 0.01) { L = mixv(L, [0.03, 0.15, 0.5], M.pray); R = mixv(R, [-0.03, 0.15, 0.5], M.pray); }
+  const kk = 1 - Math.exp(-16 * dt);
+  aimArm(M.armL, L, kk); aimArm(M.armR, R, fishK ? 0.6 : kk);
 }
 
 /* ================= 声音 ================= */
@@ -1272,7 +1375,7 @@ function initAudio() {
 function env(g, t, peak, a, d) { g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(Math.max(peak, 0.0002), t + a); g.gain.exponentialRampToValueAtTime(0.0001, t + a + d); }
 function osc(type, f0, f1, t, dur, peak, a = 0.003) { const o = ac.createOscillator(); o.type = type; o.frequency.setValueAtTime(f0, t); if (f1) o.frequency.exponentialRampToValueAtTime(f1, t + dur * 0.5); const g = ac.createGain(); env(g, t, peak, a, dur); o.connect(g).connect(master); o.start(t); o.stop(t + a + dur + 0.05); }
 function noise(t, dur, peak, type, freq, q = 1) { const n = ac.createBufferSource(); n.buffer = noiseBuf; const f = ac.createBiquadFilter(); f.type = type; f.frequency.value = freq; f.Q.value = q; const g = ac.createGain(); env(g, t, peak, 0.002, dur); n.connect(f).connect(g).connect(master); n.start(t, Math.random()); n.stop(t + dur + 0.05); }
-function woodfish(v = 1) { if (!ac || v < 0.01) return; const t = ac.currentTime; osc('sine', 640, 340, t, 0.17, 0.7 * v); osc('sine', 1250, 950, t, 0.06, 0.2 * v, 0.002); noise(t, 0.025, 0.3 * v, 'bandpass', 2600, 1.4); }
+function woodfish(v = 1, delay = 0) { if (!ac || v < 0.01) return; const t = ac.currentTime + delay; osc('sine', 640, 340, t, 0.17, 0.7 * v); osc('sine', 1250, 950, t, 0.06, 0.2 * v, 0.002); noise(t, 0.025, 0.3 * v, 'bandpass', 2600, 1.4); }
 function bowl(base = 330, vol = 0.3) { if (!ac) return; const t = ac.currentTime; [[1, 1, 5.5], [2.76, 0.4, 3], [5.4, 0.16, 1.6]].forEach(([m, a, d]) => { for (const det of [0, 1.3]) osc('sine', base * m + det, 0, t, d, vol * a * 0.5, 0.01); }); }
 function bigBell(v = 1) { if (!ac || v < 0.01) return; const t = ac.currentTime; [[1, 0.5, 9], [2.0, 0.35, 7], [2.4, 0.22, 6], [3.0, 0.18, 4.5], [4.2, 0.12, 3], [5.4, 0.08, 2]].forEach(([m, a, d]) => { for (const det of [0, 0.8]) osc('sine', 82 * m + det, 0, t, d, a * 0.55 * v, 0.01); }); noise(t, 0.12, 0.25 * v, 'lowpass', 600); }
 function drumHit(v = 1) { if (!ac || v < 0.01) return; const t = ac.currentTime; osc('sine', 95, 50, t, 0.7, 0.9 * v, 0.004); osc('sine', 160, 90, t, 0.25, 0.3 * v); noise(t, 0.18, 0.4 * v, 'lowpass', 300); }
@@ -1366,10 +1469,10 @@ function showSubs(t, l) { subsState = [t, l]; $('subsT').textContent = t; $('sub
 /* ================= 交互 ================= */
 let zenT = 0, zenMinute = 0;
 function knock(M, auto) {
-  const s = M.seated; if (!s || !s.mallet) return;
-  s.mt = 0; M.pulse = 1;
-  if (M === player) { woodfish(auto ? 0.65 : 1); if (!auto) addMerit(1, s.fish.clone().add(V(0, 0.3, 0))); }
-  else woodfish(vol(s) * 0.5);
+  const s = M.seated; if (!s || !s.fish) return;
+  M.kt = 0;
+  if (M === player) { woodfish(auto ? 0.65 : 1, 0.12); if (!auto) addMerit(1, s.fish.clone().add(V(0, 0.3, 0))); }
+  else woodfish(vol(s) * 0.5, 0.12);
 }
 function sitPlayer(s) {
   s.occ = player; sitMonk(player, s);
@@ -1405,6 +1508,7 @@ function findNear() {
   const P = player.root.position; let best = null, bd = 1e9;
   for (const s of seats) { if (s.occ) continue; const d = Math.hypot(P.x - s.x, P.z - s.z); if (d < 0.95 && d < bd) { bd = d; best = { label: '打坐', act: () => sitPlayer(s) }; } }
   for (const it of fixedInteract) { const d = Math.hypot(P.x - it.p.x, P.z - it.p.z); if (d < it.r && d < bd) { bd = d; best = it; } }
+  for (const n of npcs) { const Q = n.M.root.position; const d = Math.hypot(P.x - Q.x, P.z - Q.z); if (d < 1.6 && d < bd - 0.2 && Math.abs(Q.y - P.y) < 1.2) { bd = d; best = { label: '打招呼', act: () => greet(n) }; } }
   return best;
 }
 function interact() {
@@ -1478,7 +1582,7 @@ $('btnShake').addEventListener('click', () => {
   $('btnShake').disabled = true; const tube = $('tube'); tube.classList.remove('shake'); void tube.offsetWidth; tube.classList.add('shake'); rattle();
   setTimeout(() => { $('popStick').classList.add('out'); const idx = hashStr(todayKey() + save.uid) % FORTUNES.length; save.fortune = { date: todayKey(), idx }; persist(); setTimeout(() => { bowl(440, 0.18); showCard(idx, false); addMerit(1, headOf(player)); }, 750); }, 1350);
 });
-function closeModal() { for (const id of ['fortune', 'help', 'mapBox', 'pickBox']) $(id).hidden = true; modal = null; for (const k in keys) keys[k] = false; }
+function closeModal() { for (const id of ['fortune', 'help', 'mapBox', 'pickBox', 'guideBox']) $(id).hidden = true; modal = null; for (const k in keys) keys[k] = false; }
 $('fCancel').addEventListener('click', closeModal); $('fClose').addEventListener('click', closeModal);
 $('helpClose').addEventListener('click', closeModal); $('mapClose').addEventListener('click', closeModal); $('pickClose').addEventListener('click', closeModal);
 for (const id of ['fortune', 'help', 'mapBox', 'pickBox']) $(id).addEventListener('pointerdown', e => { if (e.target === e.currentTarget) closeModal(); });
@@ -1509,7 +1613,7 @@ $('btnMap').addEventListener('click', e => { e.currentTarget.blur(); openMap(); 
 const NODES = {
   G: [0, 24], BL: [-3.8, 14], BR: [3.8, 14], IN: [0, 17.2], MH: [0, 7.5], MHin: [0, 0.6], SL: [-14.7, 7.5], SR: [14.7, 7.5],
   WH: [-14.7, -9], WHin: [-18.8, -9], EH: [14.7, -9], EHin: [18.8, -9], SLb: [-14.7, -19], SRb: [14.7, -19], BC: [0, -21.5], LHin: [0, -31.5],
-  BEL: [-14.5, 20], DR: [14.5, 20], FT: [9.5, 8]
+  BEL: [-14.5, 20], DR: [14.5, 20], FT: [9.0, 6.0]
 };
 const EDGES = [['G', 'IN'], ['IN', 'BL'], ['IN', 'BR'], ['G', 'BL'], ['G', 'BR'], ['BL', 'MH'], ['BR', 'MH'], ['MH', 'MHin'], ['MH', 'SL'], ['MH', 'SR'], ['G', 'BEL'], ['BEL', 'SL'], ['G', 'DR'], ['DR', 'SR'], ['BR', 'FT'], ['FT', 'SR'], ['FT', 'MH'],
   ['SL', 'WH'], ['WH', 'WHin'], ['WH', 'SLb'], ['SR', 'EH'], ['EH', 'EHin'], ['EH', 'SRb'], ['SLb', 'BC'], ['SRb', 'BC'], ['BC', 'LHin']];
@@ -1540,12 +1644,13 @@ const TASKS = [
   { node: 'BC', spot: [6.8, -19.8], face: V(9, 0, -21), act: 'look', dur: 6 },
   { node: 'WHin', seatHall: 'zen', act: 'sit', dur: 40 },
   { node: 'LHin', seatHall: 'lecture', act: 'sit', dur: 60 },
-  { node: 'FT', spot: [9.3, 7.0], face: V(13, 0, 6), act: 'look', dur: 4 }
+  { node: 'FT', spot: [8.8, 6.8], face: V(13, 0, 6), act: 'look', dur: 4 }
 ];
 for (let i = 0; i < 4; i++) { const n = npc(ROBES[(i + 1) % 4], 'wander'); const st = Object.values(NODES)[i * 3 % Object.keys(NODES).length]; n.M.root.position.set(st[0], groundH(st[0], st[1]), st[1]); n.t = 1 + i * 2; }
-{ const n = npc({ robe: 0x6a6660, robe2: 0x55504a }, 'sweep'); n.M.broom = true; n.M.root.position.set(-6, 0, 21);
-  const br = new THREE.Group(); br.position.set(0, 0.55, 0.42); n.M.root.add(br);
-  const h = new THREE.Mesh(monkGeo.broomH, MATS.wood); h.rotation.x = 0.5; br.add(h); const bb = new THREE.Mesh(monkGeo.broomB, cm(0xb09a5a)); bb.position.set(0, -0.62, 0.35); bb.rotation.x = 0.5 + PI; br.add(bb); n.broom = br; }
+{ const n = npc({ robe: 0x6a6660, robe2: 0x55504a }, 'sweep'); n.M.broom = true; n.M.root.position.set(-4, 0, 26.2);
+  const br = new THREE.Group(); br.position.set(0, -0.6, 0.02); n.M.armR.add(br);
+  const h = new THREE.Mesh(monkGeo.broomH, MATS.wood); h.position.y = -0.5; h.castShadow = true; br.add(h);
+  const bb = new THREE.Mesh(monkGeo.broomB, cm(0xb09a5a)); bb.position.y = -1.18; bb.rotation.x = PI; bb.castShadow = true; br.add(bb); n.broom = br; }
 function setWalk(n, pts) { n.path = pts.map(p => V(p[0], 0, p[1])); n.state = 'walk'; }
 function planTask(n) {
   const T = TASKS[Math.floor(Math.random() * TASKS.length)];
@@ -1559,10 +1664,13 @@ function planTask(n) {
 function updateNPC(n, dt, t) {
   const M = n.M;
   if (n.role === 'fish') { n.t -= dt; if (n.t <= 0) { knock(M, true); n.t = n.rate * (Math.random() < 0.06 ? 4 : 1); } }
-  else if (n.role === 'sweep') {
-    n.t += dt; const x = Math.sin(n.t * 0.12) * 8; const P = M.root.position; const nx = x, nz = 21 + Math.sin(n.t * 0.05) * 1.5;
+  else if (n.talkT > 0) {
+    n.talkT -= dt; M.walkAmt = lerp(M.walkAmt, 0, 0.2);
+    if (!M.seated) M.root.rotation.y = lerpAngle(M.root.rotation.y, Math.atan2(player.root.position.x - M.root.position.x, player.root.position.z - M.root.position.z), 1 - Math.exp(-6 * dt));
+  } else if (n.role === 'sweep') {
+    n.t += dt; const P = M.root.position; const nx = Math.sin(n.t * 0.12) * 5, nz = 26.2 + Math.sin(n.t * 0.07) * 0.4;
     const dx = nx - P.x, dz = nz - P.z; P.x = nx; P.z = nz; if (Math.hypot(dx, dz) > 0.0005) M.root.rotation.y = lerpAngle(M.root.rotation.y, Math.atan2(dx, dz), 0.05);
-    M.walk += dt * 2; M.walkAmt = 0.4; n.broom.rotation.y = Math.sin(t * 2.2) * 0.5;
+    M.walk += dt * 2; M.walkAmt = 0.4;
   } else if (n.role === 'wander') {
     if (n.state === 'idle') { n.t -= dt; if (n.t <= 0) { planTask(n); n.t = 2 + Math.random() * 4; } }
     else if (n.state === 'walk') {
@@ -1591,8 +1699,99 @@ function startAct(n) {
   else if (T.act === 'bow') { M.bowT = 0; M.onBowDone = () => { M.bowT = 0; }; setTimeout(() => { M.onBowDone = null; }, 2500); }
 }
 
+/* ================= 和小和尚打招呼 ================= */
+const pick = a => a[Math.floor(Math.random() * a.length)];
+const LINES = {
+  common: ['阿弥陀佛，施主好。', '慢慢走，不着急。', '吃饭的时候吃饭，睡觉的时候睡觉。', '今天山里雾大，空气很好。', '日日是好日。'],
+  tips: ['讲经堂在大雄宝殿后面，法师正在讲《心经》，绕到殿后就是。', '东边的念经堂可以选一部经跟着念。', '西边的禅堂很安静，适合坐一会儿。', '钟楼在西边，撞一下钟，声音能传到山下。', '签亭在大殿东南角，一天可以求一支签。', '后院的两棵银杏黄了，叶子落了一地。', '不知道去哪儿，可以点右上角的「导览」。'],
+  sweep: ['扫地扫地扫心地，心地不扫空扫地。', '落叶扫完又落，扫着扫着心就静了。', '施主小心脚下。'],
+  fish: ['（他正专心敲木鱼，朝你点了点头）', '（木鱼声没停，他对你微微一笑）'],
+  listen: ['（他竖起手指，示意你小声些，法师正在讲经）', '（他往旁边让了让，示意你也坐下听）'],
+  master: ['（法师微微颔首）请随意找个蒲团坐下。', '（法师合掌）听不懂也不要紧，先坐下来。']
+};
+let bubble = null; const greetCD = new Map();
+function greet(n) {
+  const M = n.M;
+  const line = n.role === 'wander' ? (Math.random() < 0.6 ? pick(LINES.tips) : pick(LINES.common)) : pick(LINES[n.role] || LINES.common);
+  M.talkT = 5; if (n.role === 'wander' || n.role === 'sweep') { n.talkT = 5; M.prayT = 1.6; }
+  player.prayT = 1.6;
+  player.root.rotation.y = Math.atan2(M.root.position.x - player.root.position.x, M.root.position.z - player.root.position.z);
+  bubble = { M, t: 5.5 }; $('bubble').textContent = line; $('bubble').hidden = false;
+  const now = performance.now(); if (!greetCD.has(n) || now - greetCD.get(n) > 20000) { greetCD.set(n, now); addMerit(1, headOf(player)); }
+}
+function updateBubble(dt) {
+  if (!bubble) return; bubble.t -= dt;
+  const el = $('bubble');
+  if (bubble.t <= 0 || modal) { el.hidden = true; bubble = null; return; }
+  _pv.copy(headOf(bubble.M)).add(V(0, 0.35, 0)).project(camera);
+  if (_pv.z > 1) { el.hidden = true; return; }
+  el.hidden = false; el.style.left = ((_pv.x + 1) / 2 * innerWidth) + 'px'; el.style.top = ((1 - _pv.y) / 2 * innerHeight) + 'px';
+}
+
+/* ================= 导览：地上的金色箭头 ================= */
+const DESTS = [
+  { n: '大雄宝殿', d: '供奉金身佛像，可以打坐、敲木鱼、诵《心经》', node: 'MHin', p: [0, -1.2] },
+  { n: '讲经堂', d: '在大殿后面，法师正在讲《心经》', node: 'LHin', p: [0, -33.2] },
+  { n: '念经堂', d: '东侧配殿，选一部经跟着念', node: 'EHin', p: [19.8, -9] },
+  { n: '禅堂', d: '西侧配殿，安静打坐，有计时', node: 'WHin', p: [-19.8, -9] },
+  { n: '香炉', d: '前院正中，上一炷香', node: 'IN', p: [0, 17.2] },
+  { n: '钟楼', d: '前院西侧，撞钟', node: 'BEL', p: [bell.spot.x, bell.spot.z] },
+  { n: '鼓楼', d: '前院东侧，击鼓', node: 'DR', p: [drum.spot.x, drum.spot.z] },
+  { n: '签亭', d: '大殿东南，每日一签', node: 'FT', p: [pav.spot.x, pav.spot.z] },
+  { n: '银杏树', d: '后院两棵金黄的老银杏', node: 'BC', p: [6.2, -19.5] },
+  { n: '莲池', d: '山门内两侧的荷花池', node: 'G', p: [-5.6, 25.4] }
+];
+const arrowGeo = (() => { const s = new THREE.Shape(); s.moveTo(-0.34, -0.16); s.lineTo(0, 0.22); s.lineTo(0.34, -0.16); s.lineTo(0.18, -0.16); s.lineTo(0, 0.04); s.lineTo(-0.18, -0.16); s.closePath(); const g = new THREE.ShapeGeometry(s); g.rotateX(-PI / 2); return g; })();
+const arrows = new THREE.InstancedMesh(arrowGeo, new THREE.MeshBasicMaterial({ color: 0xffcf6a, transparent: true, opacity: 0.92, depthWrite: false, toneMapped: false, polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -8 }), 160);
+arrows.count = 0; arrows.frustumCulled = false; scene.add(arrows);
+let guide = null, guideT = 0; const guidePts = [];
+function segBlocked(ax, az, bx, bz) {
+  for (const c of colliders) {
+    if (c.t !== 'b' || c.y1 < 0.6) continue;
+    let t0 = 0, t1 = 1, hit = true; const dx = bx - ax, dz = bz - az;
+    for (const [o, d, lo, hi] of [[ax, dx, c.x0 - 0.15, c.x1 + 0.15], [az, dz, c.z0 - 0.15, c.z1 + 0.15]]) {
+      if (Math.abs(d) < 1e-9) { if (o < lo || o > hi) { hit = false; break; } continue; }
+      let a = (lo - o) / d, b = (hi - o) / d; if (a > b) [a, b] = [b, a]; t0 = Math.max(t0, a); t1 = Math.min(t1, b); if (t0 > t1) { hit = false; break; }
+    }
+    if (hit) return true;
+  }
+  return false;
+}
+function computeGuide() {
+  const P = player.root.position, D = guide;
+  let best = null, bd = 1e9;
+  for (const [k, [x, z]] of Object.entries(NODES)) { const d = Math.hypot(P.x - x, P.z - z); if (d < bd && !segBlocked(P.x, P.z, x, z)) { bd = d; best = k; } }
+  if (!best) best = nearestNode(P.x, P.z);
+  const pts = route(best, D.node).map(p => [p[0], p[1]]); pts.push(D.p);
+  while (pts.length >= 2 && !segBlocked(P.x, P.z, pts[1][0], pts[1][1]) && Math.hypot(P.x - pts[1][0], P.z - pts[1][1]) < Math.hypot(pts[0][0] - pts[1][0], pts[0][1] - pts[1][1]) + 0.5) pts.shift();
+  pts.unshift([P.x, P.z]);
+  guidePts.length = 0; let carry = 1.3;
+  for (let i = 0; i < pts.length - 1 && guidePts.length < 160; i++) {
+    const [ax, az] = pts[i], [bx, bz] = pts[i + 1], L = Math.hypot(bx - ax, bz - az); let s = carry;
+    while (s < L && guidePts.length < 160) { const x = lerp(ax, bx, s / L), z = lerp(az, bz, s / L); guidePts.push([x, groundH(x, z) + 0.04, z, Math.atan2(-(bx - ax), -(bz - az))]); s += 1.0; }
+    carry = s - L;
+  }
+}
+const _gm = new THREE.Matrix4();
+function drawGuide(t) {
+  if (!guide) { arrows.count = 0; return; }
+  guidePts.forEach(([x, y, z, yaw], i) => { const k = 1 + 0.35 * Math.max(0, Math.sin(i * 0.55 - t * 6)); _gm.compose(_p.set(x, y, z), _q.setFromEuler(_e.set(0, yaw, 0, 'YXZ')), _s.set(k, 1, k)); arrows.setMatrixAt(i, _gm); });
+  arrows.count = guidePts.length; arrows.instanceMatrix.needsUpdate = true;
+}
+function startGuide(D) { guide = D; guideT = 0; closeModal(); $('btnGuide').textContent = '导览：' + D.n; toast(`跟着地上的金色箭头走，去${D.n}`); }
+function stopGuide() { guide = null; arrows.count = 0; $('btnGuide').textContent = '导览'; }
+function openGuide() {
+  modal = 'guide'; const L = $('guideList'); L.innerHTML = '';
+  for (const D of DESTS) { const b = document.createElement('button'); b.type = 'button'; b.innerHTML = `<b>${D.n}</b><span>${D.d}</span>`; b.addEventListener('click', () => startGuide(D)); L.appendChild(b); }
+  $('guideStop').hidden = !guide; $('guideBox').hidden = false; L.firstChild.focus();
+}
+$('btnGuide').addEventListener('click', e => { e.currentTarget.blur(); openGuide(); });
+$('guideClose').addEventListener('click', closeModal);
+$('guideStop').addEventListener('click', () => { stopGuide(); closeModal(); });
+$('guideBox').addEventListener('pointerdown', e => { if (e.target === e.currentTarget) closeModal(); });
+
 /* ================= 输入 ================= */
-const GAME_KEYS = ['KeyW', 'KeyA', 'KeyS', 'KeyD', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space', 'KeyE', 'KeyQ', 'KeyR', 'KeyB', 'KeyM', 'ShiftLeft', 'ShiftRight', 'Escape'];
+const GAME_KEYS = ['KeyW', 'KeyA', 'KeyS', 'KeyD', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space', 'KeyE', 'KeyQ', 'KeyR', 'KeyB', 'KeyM', 'KeyG', 'ShiftLeft', 'ShiftRight', 'Escape'];
 addEventListener('keydown', e => {
   if (modal) { if (e.code === 'Escape') closeModal(); return; }
   if (!started) { if ((e.code === 'Enter' || e.code === 'Space') && !$('enter').disabled) { e.preventDefault(); $('enter').click(); } return; }
@@ -1600,8 +1799,9 @@ addEventListener('keydown', e => {
   keys[e.code] = true; if (e.repeat && e.code !== 'Space') return;
   const s = player.seated;
   if (e.code === 'KeyM') { openMap(); return; }
+  if (e.code === 'KeyG') { openGuide(); return; }
   if (s) {
-    if (e.code === 'Space' && s.mallet) knock(player, false);
+    if (e.code === 'Space' && s.fish) knock(player, false);
     else if (e.code === 'KeyR' && (s.hall === 'main' || s.hall === 'chant')) chant.on ? stopChant() : (s.hall === 'main' ? startChant('xin') : openPick());
     else if (e.code === 'KeyB' && s.hall !== 'zen') bowPlayer();
     else if (e.code === 'KeyE' || e.code === 'Escape') standPlayer();
@@ -1631,6 +1831,7 @@ $('enter').addEventListener('click', () => {
   initAudio(); bigBell(0.7);
   try { speechSynthesis.getVoices(); } catch (e) {}
   toast(isTouch ? '用左下圆盘走路，拖动画面看四周' : '用 W、A、S、D 键走路，按住鼠标拖动看四周');
+  setTimeout(() => toast('寺里有十处地方可以去。点右上角「导览」，地上会出现金色箭头带路'), 3300);
   canvas.focus();
 });
 
@@ -1661,7 +1862,7 @@ function rayBoxT(o, d, c) {
 const _d = new THREE.Vector3();
 
 /* ================= 主循环 ================= */
-const clock = new THREE.Clock(); let time = 0, areaName = '', chirpT = 5;
+const clock = new THREE.Clock(); let time = 0, areaName = '', chirpT = 5, camDistNow = 5, camY = 3;
 function update(dt) {
   time += dt;
   const P = player.root.position;
@@ -1683,6 +1884,7 @@ function update(dt) {
   }
   player.walkAmt = lerp(player.walkAmt, moving ? 1 : 0, 1 - Math.exp(-10 * dt));
   if (!player.seated) P.y = lerp(P.y, groundH(P.x, P.z), 1 - Math.exp(-16 * dt));
+  followShadow(P.x, P.z);
 
   if (busy) {
     busy.t += dt;
@@ -1701,7 +1903,6 @@ function update(dt) {
   drum.t += dt; drum.drum.children[0].scale.setScalar(drum.t < 0.3 ? 1 + Math.sin(drum.t * 40) * 0.01 * (1 - drum.t / 0.3) : 1);
 
   animMonk(player, dt, time);
-  for (const s of seats) if (s.mallet) { s.mt += dt; const k = clamp(s.mt / 0.2, 0, 1); s.mallet.rotation.z = -0.05 + 0.6 * Math.sin(k * PI) * (1 - k * 0.3); }
   for (const n of npcs) updateNPC(n, dt, time);
   updateChant(dt); updateLecture(dt);
   if (player.seated && player.seated.hall === 'zen') { zenT += dt; const mm = Math.floor(zenT / 60), ss = Math.floor(zenT % 60); $('zen').innerHTML = `${String(mm).padStart(2, '0')}:${String(ss).padStart(2, '0')}<small>静坐中</small>`; if (mm > zenMinute) { zenMinute = mm; addMerit(5, headOf(player)); } }
@@ -1716,6 +1917,12 @@ function update(dt) {
   for (const p of leaves) { if (p.life <= 0) continue; p.life -= dt; if (p.life <= 0 || p.s.position.y < 0.05) { p.s.visible = false; p.life = 0; continue; } p.s.position.y -= dt * 0.9; p.s.position.x += Math.sin(time * 2 + p.seed) * dt * 0.6; p.s.position.z += Math.cos(time * 1.7 + p.seed) * dt * 0.4; p.s.material.rotation = time * 2 + p.seed; }
   chirpT -= dt; if (chirpT <= 0) { chirpT = 5 + Math.random() * 9; chirp(started ? 0.8 : 0); }
 
+  // 导览箭头、对话气泡
+  if (guide) {
+    guideT -= dt; if (guideT <= 0) { computeGuide(); guideT = 0.3; }
+    if (Math.hypot(P.x - guide.p[0], P.z - guide.p[1]) < 2.0) { toast(`到了：${guide.n}`); stopGuide(); }
+  }
+  drawGuide(time); updateBubble(dt);
   // 互动提示、区域名、字幕
   near = null;
   if (started && !player.seated && !busy && !modal) near = findNear();
@@ -1734,23 +1941,27 @@ function update(dt) {
   camTarget.lerp(tgt, 1 - Math.exp(-10 * dt));
   const cp = Math.cos(cam.pitch);
   const want = V(camTarget.x + Math.sin(cam.yaw) * cp * cam.dist, camTarget.y + Math.sin(cam.pitch) * cam.dist, camTarget.z + Math.cos(cam.yaw) * cp * cam.dist);
-  const dir = want.clone().sub(camTarget); let tmin = 1;
+  const dir = want.clone().sub(camTarget); const full = dir.length(); let tmin = 1;
   for (const c of colliders) if (c.t === 'b' && c.y1 > 0.5) { const t = rayBoxT(camTarget, dir, c); if (t < tmin) tmin = t; }
-  const fin = camTarget.clone().add(dir.multiplyScalar(Math.max(0.12, tmin - 0.06)));
+  dir.divideScalar(full);
+  // 撞墙时立刻拉近，离开后慢慢退回，避免镜头来回跳
+  const allowed = Math.max(0.6, full * tmin - 0.3);
+  camDistNow = allowed < camDistNow ? allowed : lerp(camDistNow, allowed, 1 - Math.exp(-2.5 * dt));
+  const fin = camTarget.clone().addScaledVector(dir, camDistNow);
   for (const r of roofRects) {
     const tIn = camTarget.x > r.x0 && camTarget.x < r.x1 && camTarget.z > r.z0 && camTarget.z < r.z1;
     const cIn = fin.x > r.x0 && fin.x < r.x1 && fin.z > r.z0 && fin.z < r.z1;
     if (tIn || (cIn && fin.y > r.cap - 0.5)) fin.y = Math.min(fin.y, r.cap);
   }
-  fin.y = Math.max(fin.y, groundH(fin.x, fin.z) + 0.25);
+  camY = fin.y < camY ? fin.y : lerp(camY, fin.y, 1 - Math.exp(-3 * dt));
+  fin.y = Math.max(camY, groundH(fin.x, fin.z) + 0.25);
   camera.position.copy(fin); camera.lookAt(camTarget);
 }
 applyQuality(true);
 renderer.setAnimationLoop(() => { const dt = Math.min(clock.getDelta(), 0.05); update(dt); renderer.render(scene, camera); });
 function fitCamera() { camera.aspect = innerWidth / innerHeight; camera.fov = camera.aspect < 0.8 ? 72 : 55; camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight); }
 fitCamera();
-addEventListener('resize', fitCamera);
-</script>
+addEventListener('resize', fitCamera);</script>
 
 </body>
 </html>
